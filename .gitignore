@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+work/*.sqlite3
+work/*.jsonl
+work/roms/
