@@ -69,3 +69,23 @@ Para novo profile:
 - Estruturas tipadas com `dataclasses`.
 - CLI com `argparse`.
 - Scanner explícito em funções pequenas para facilitar extensão e testes.
+
+
+## Papel de `dump-range`
+
+`dump-range` é o visualizador de inspeção manual de script e complementa o scanner persistente:
+
+- **raw**: bytes crus com offsets para confirmar ranges e alinhamento.
+- **decode**: bytes crus + texto decodificado (CP932/Shift-JIS) por chunk, preservando unicode e tolerando bytes inválidos.
+- **annotate**: camada heurística orientada a engenharia reversa para destacar blocos textuais plausíveis e cercas de controle (`prefix/suffix` com tokens neutros como `<CMD_8166>`).
+
+Diferença conceitual:
+
+1. **Bytes crus** (`raw_hex`): fonte da verdade binária.
+2. **Texto decodificado** (`decoded`): interpretação de encoding com substituição segura em falhas.
+3. **Anotação heurística** (`text_guess`, `prefix_tokens`, `suffix_tokens`): hipótese operacional para acelerar estudo de control codes sem afirmar semântica definitiva.
+
+Comandos auxiliares:
+
+- `find-offset`: encontra candidatos persistidos que cobrem um offset específico.
+- `list-range-candidates`: lista candidatos persistidos que intersectam um intervalo.

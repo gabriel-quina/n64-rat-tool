@@ -184,6 +184,31 @@ class RomToolDB:
         )
         return cur.fetchall()
 
+
+    def fetch_candidates_covering_offset(self, rom_id: int, offset: int, limit: int = 20) -> list[sqlite3.Row]:
+        cur = self.conn.execute(
+            """
+            SELECT * FROM string_candidate
+            WHERE rom_id=? AND start_off <= ? AND end_off > ?
+            ORDER BY start_off
+            LIMIT ?
+            """,
+            (rom_id, offset, offset, limit),
+        )
+        return cur.fetchall()
+
+    def fetch_candidates_in_range(self, rom_id: int, start: int, end: int, limit: int = 200) -> list[sqlite3.Row]:
+        cur = self.conn.execute(
+            """
+            SELECT * FROM string_candidate
+            WHERE rom_id=? AND NOT (end_off <= ? OR start_off >= ?)
+            ORDER BY start_off
+            LIMIT ?
+            """,
+            (rom_id, start, end, limit),
+        )
+        return cur.fetchall()
+
     def count_strings(self, rom_id: int) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM string_candidate WHERE rom_id=?", (rom_id,)).fetchone()
         return int(row["c"])
