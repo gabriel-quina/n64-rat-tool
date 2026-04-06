@@ -48,6 +48,18 @@ class StringCandidate:
 
 
 @dataclass(slots=True)
+class SegmentRecord:
+    id: int
+    rom_id: int
+    name: str
+    start_off: int
+    end_off: int
+    kind: str
+    encoding: str
+    notes: str
+
+
+@dataclass(slots=True)
 class ScanStats:
     total_strings: int
     by_kind: dict[str, int]
