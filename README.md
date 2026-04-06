@@ -83,9 +83,9 @@ Formato exportado (resumo):
   "start_off": "0x006404AC",
   "end_off": "0x006404F9",
   "kind": "nul_candidate",
-  "prefix_tokens": ["<CMD_8166>"],
-  "text_visible": "００わかりました。それではもういちど、厩舎の名前をきめてください。",
-  "suffix_tokens": ["<CMD_8170>", "<CMD_8184>"],
+  "prefix_tokens": ["<CMD_8166>", "００"],
+  "text_visible": "わかりました。それではもういちど、厩舎の名前をきめてください。",
+  "suffix_tokens": ["<CMD_8170>", "<CMD_8184>", "００", "<CMD_00>"],
   "decoded_text": "’００わかりました。それではもういちど、厩舎の名前をきめてください。｝＞００",
   "translation": "",
   "notes": ""
@@ -95,7 +95,9 @@ Formato exportado (resumo):
 ### `decoded_text` vs `text_visible`
 
 - `decoded_text`: decode bruto do blob (inclui bytes de controle interpretados como glifos estranhos).
-- `text_visible`: versão para tradução com tokens neutros (`<CMD_XXXX>`) separados em `prefix_tokens`/`suffix_tokens` e comandos inline preservados como marcador.
+- `text_visible`: versão para tradução com tokens neutros (`<CMD_XXXX>`) separados em `prefix_tokens`/`suffix_tokens`; parâmetros textuais curtos como `００`/`１３` também podem ser destacados fora do corpo quando aparecem como cabeçalho/cauda de controle.
+- `suffix_tokens`: inclui apenas bytes realmente presentes depois do corpo visível. O terminador NUL final aparece como `<CMD_00>` somente quando o `raw_hex` da candidata termina mesmo em `00`.
+- `notes`: warnings neutros para casos ambíguos, como candidata aparentemente cortada ou fusão de mais de uma fala no mesmo blob.
 
 ### Segmentos fora de tradução
 

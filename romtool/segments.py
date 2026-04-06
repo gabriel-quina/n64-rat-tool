@@ -7,6 +7,7 @@ from romtool.scanner import cp932_char_len
 
 KNOWN_COMMAND_CODES = {"8166", "8168", "8170", "8184", "8195", "819C"}
 NON_TRANSLATABLE_KINDS = {"table", "nontranslatable"}
+FULLWIDTH_DIGITS = frozenset("０１２３４５６７８９")
 
 
 @dataclass(slots=True)
@@ -15,6 +16,7 @@ class TokenizedString:
     text_visible: str
     suffix_tokens: list[str]
     inline_tokens: list[str]
+    warnings: list[str]
 
 
 def _cmd(code: str) -> str:
@@ -23,6 +25,20 @@ def _cmd(code: str) -> str:
 
 def _is_unknown_cmd_lead(byte: int) -> bool:
     return byte < 0x20 or byte in {0x7F, 0xFF}
+
+
+def _is_control_parameter_text(text: str) -> bool:
+    return bool(text) and all(ch in FULLWIDTH_DIGITS for ch in text)
+
+
+def _visible_text_starts_mid_sentence(text: str) -> bool:
+    if len(text) < 2:
+        return False
+    if text.startswith("れでは"):
+        return True
+    if text[0] not in "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮー":
+        return False
+    return text[1] not in FULLWIDTH_DIGITS
 
 
 def tokenize_raw_text(raw: bytes, encoding: str = "cp932", known_codes: set[str] | None = None) -> TokenizedString:
@@ -53,34 +69,87 @@ def tokenize_raw_text(raw: bytes, encoding: str = "cp932", known_codes: set[str]
         units.append(("cmd", _cmd(raw[i : i + 1].hex().upper())))
         i += 1
 
-    first_text = next((idx for idx, item in enumerate(units) if item[0] == "text"), None)
-    last_text = next((idx for idx in range(len(units) - 1, -1, -1) if units[idx][0] == "text"), None)
-
-    if first_text is None or last_text is None:
+    if not any(kind == "text" for kind, _ in units):
         return TokenizedString(
             prefix_tokens=[token for _, token in units],
             text_visible="",
             suffix_tokens=[],
             inline_tokens=[],
+            warnings=[],
         )
 
-    prefix_tokens = [token for kind, token in units[:first_text] if kind == "cmd"]
-    suffix_tokens = [token for kind, token in units[last_text + 1 :] if kind == "cmd"]
+    body_start = 0
+    prefix_tokens: list[str] = []
+    saw_prefix_cmd = False
+    while body_start < len(units):
+        kind, token = units[body_start]
+        if kind == "cmd":
+            prefix_tokens.append(token)
+            saw_prefix_cmd = True
+            body_start += 1
+            continue
+        if saw_prefix_cmd and _is_control_parameter_text(token):
+            text_run: list[str] = []
+            while body_start < len(units) and units[body_start][0] == "text" and _is_control_parameter_text(units[body_start][1]):
+                text_run.append(units[body_start][1])
+                body_start += 1
+            prefix_tokens.append("".join(text_run))
+            continue
+        break
+
+    body_end = len(units) - 1
+    suffix_tokens_reversed: list[str] = []
+    saw_suffix_cmd = False
+    while body_end >= body_start:
+        kind, token = units[body_end]
+        if kind == "cmd":
+            suffix_tokens_reversed.append(token)
+            saw_suffix_cmd = True
+            body_end -= 1
+            continue
+        if saw_suffix_cmd and _is_control_parameter_text(token):
+            text_run_reversed: list[str] = []
+            while body_end >= body_start and units[body_end][0] == "text" and _is_control_parameter_text(units[body_end][1]):
+                text_run_reversed.append(units[body_end][1])
+                body_end -= 1
+            suffix_tokens_reversed.append("".join(reversed(text_run_reversed)))
+            continue
+        break
+    suffix_tokens = list(reversed(suffix_tokens_reversed))
 
     text_parts: list[str] = []
     inline_tokens: list[str] = []
-    for kind, token in units[first_text : last_text + 1]:
+    warnings: list[str] = []
+    visible_units = units[body_start : body_end + 1]
+    if not visible_units:
+        return TokenizedString(
+            prefix_tokens=prefix_tokens,
+            text_visible="",
+            suffix_tokens=suffix_tokens,
+            inline_tokens=[],
+            warnings=[],
+        )
+
+    for idx, (kind, token) in enumerate(visible_units):
         if kind == "text":
             text_parts.append(token)
         else:
             inline_tokens.append(token)
             text_parts.append(token)
+            next_text = visible_units[idx + 1][1] if idx + 1 < len(visible_units) and visible_units[idx + 1][0] == "text" else ""
+            if next_text and _is_control_parameter_text(next_text):
+                warnings.append("ambiguous_embedded_control_split")
+
+    text_visible = "".join(text_parts)
+    if text_visible and _visible_text_starts_mid_sentence(text_visible):
+        warnings.append("warning_possible_truncated_start")
 
     return TokenizedString(
         prefix_tokens=prefix_tokens,
-        text_visible="".join(text_parts),
+        text_visible=text_visible,
         suffix_tokens=suffix_tokens,
         inline_tokens=inline_tokens,
+        warnings=sorted(set(warnings)),
     )
 
 

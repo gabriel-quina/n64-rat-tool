@@ -43,6 +43,12 @@ def export_segment_jsonl(db: RomToolDB, rom_id: int, segment_name: str, out_path
     with out_path.open("w", encoding="utf-8") as f:
         for row in rows:
             tokenized = tokenize_raw_text(bytes.fromhex(row["raw_hex"]), encoding=segment.encoding)
+            notes: list[str] = []
+            if row["start_off"] < segment.start_off:
+                notes.append("warning_segment_starts_inside_candidate")
+            if row["end_off"] > segment.end_off:
+                notes.append("warning_segment_ends_inside_candidate")
+            notes.extend(tokenized.warnings)
             item = {
                 "segment": segment.name,
                 "string_uid": row["string_uid"],
@@ -54,7 +60,7 @@ def export_segment_jsonl(db: RomToolDB, rom_id: int, segment_name: str, out_path
                 "suffix_tokens": tokenized.suffix_tokens,
                 "decoded_text": row["decoded_text"],
                 "translation": "",
-                "notes": "",
+                "notes": "; ".join(sorted(set(notes))),
             }
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
