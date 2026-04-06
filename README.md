@@ -43,6 +43,11 @@ python -m romtool list-strings --limit 20
 python -m romtool show-string --id STR_00640534_NUL
 python -m romtool find-offset --offset 0x00640534
 python -m romtool dump-range --start 0x640000 --end 0x640040
+python -m romtool dump-range --start 0x640000 --end 0x640040 --mode raw
+python -m romtool dump-range --start 0x640400 --end 0x640950 --mode decode --encoding cp932
+python -m romtool dump-range --start 0x640400 --end 0x640950 --mode annotate --encoding cp932
+python -m romtool find-offset --offset 0x6404AC
+python -m romtool list-range-candidates --start 0x640400 --end 0x640950
 ```
 
 ## Heurística de scanner (foco em precisão)
@@ -98,3 +103,30 @@ python -m romtool scan-text --start 0x00640400 --end 0x00640950 --force
 - Pipeline de reinserção segura.
 - Suporte a encodings múltiplos por profile.
 - Análise de ponteiros.
+
+
+## dump-range como visualizador de script
+
+O comando `dump-range` agora tem modos explícitos orientados a reverse engineering:
+
+- `--mode raw`: hexdump com offset por linha (`--chunk-size` configurável).
+- `--mode decode`: mostra `raw` + `decoded` por chunk, com decode seguro (`errors=replace`).
+- `--mode annotate`: visão heurística de script com `prefix`, `text_guess` e `suffix` para ajudar a separar texto de bytes de controle.
+
+Flags úteis:
+
+- `--encoding cp932` (default atual).
+- `--chunk-size 16` (ou 32, etc.) para `raw/decode`.
+- `--only-text` para esconder trechos pouco textuais em `decode/annotate`.
+- `--json` para saída estruturada em tooling.
+
+Exemplo de saída (`annotate`, simplificado):
+
+```text
+0x006404AC
+raw: 8166824f824f...
+decoded: ’００わかりました。それでは...
+prefix: <CMD_8166><TEXTLIKE_824F><TEXTLIKE_824F>
+text_guess: わかりました。それでは...
+suffix: <TEXTLIKE_8142><CMD_8170><CMD_8184>
+```

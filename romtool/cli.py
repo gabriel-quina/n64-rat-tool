@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from romtool.db import RomToolDB
+from romtool.dumpview import annotate_blocks, blocks_to_json, chunk_bytes, decode_chunks, lines_to_json
 from romtool.exporter import export_jsonl
 from romtool.profiles.generic_n64 import build_profile
 from romtool.rom import calculate_fingerprint, import_rom
@@ -156,7 +157,10 @@ def cmd_list_strings(args: argparse.Namespace) -> int:
     rows = db.fetch_strings(limit=args.limit)
     db.close()
     for row in rows:
-        print(f"{row['string_uid']} off=0x{row['start_off']:08X} kind={row['kind']} conf={row['confidence']:.2f} text={row['normalized_text']}")
+        print(
+            f"{row['string_uid']} off=0x{row['start_off']:08X} kind={row['kind']} "
+            f"conf={row['confidence']:.2f} text={row['normalized_text']}"
+        )
     return 0
 
 
@@ -164,17 +168,106 @@ def _parse_hex(text: str) -> int:
     return int(text, 16) if text.lower().startswith("0x") else int(text)
 
 
-def cmd_dump_range(args: argparse.Namespace) -> int:
+def _read_dump_data() -> tuple[bytes, int]:
     db = RomToolDB(db_path())
+    db.init_schema()
     rom = db.get_latest_rom()
     db.close()
     if not rom:
-        logger.error("Nenhuma ROM importada.")
+        raise RuntimeError("Nenhuma ROM importada.")
+    return Path(rom.path).read_bytes(), rom.id
+
+
+def cmd_dump_range(args: argparse.Namespace) -> int:
+    try:
+        rom_data, _ = _read_dump_data()
+    except RuntimeError as exc:
+        logger.error(str(exc))
         return 1
+
     start = _parse_hex(args.start)
     end = _parse_hex(args.end)
-    data = Path(rom.path).read_bytes()[start:end]
-    print(data.hex())
+    if end <= start:
+        logger.error("Faixa inválida: --end deve ser maior que --start")
+        return 2
+
+    data = rom_data[start:end]
+    if args.mode == "raw":
+        lines = chunk_bytes(data, start=start, chunk_size=args.chunk_size)
+        if args.json:
+            print(lines_to_json(lines))
+            return 0
+        for line in lines:
+            print(f"0x{line.offset:08X}  raw={line.raw_hex}")
+        return 0
+
+    if args.mode == "decode":
+        lines = decode_chunks(data, start=start, chunk_size=args.chunk_size, encoding=args.encoding, only_text=args.only_text)
+        if args.json:
+            print(lines_to_json(lines))
+            return 0
+        for line in lines:
+            print(f"0x{line.offset:08X}  raw={line.raw_hex}")
+            print(f"decoded={line.decoded}")
+        return 0
+
+    blocks = annotate_blocks(data, start=start, encoding=args.encoding, only_text=args.only_text)
+    if args.json:
+        print(blocks_to_json(blocks))
+        return 0
+
+    for block in blocks:
+        print(f"0x{block.offset:08X}")
+        print(f"raw: {block.raw_hex}")
+        print(f"decoded: {block.decoded}")
+        print(f"prefix: {''.join(block.prefix_tokens) if block.prefix_tokens else '-'}")
+        print(f"text_guess: {block.text_guess if block.text_guess else '-'}")
+        print(f"suffix: {''.join(block.suffix_tokens) if block.suffix_tokens else '-'}")
+    return 0
+
+
+def cmd_find_offset(args: argparse.Namespace) -> int:
+    offset = _parse_hex(args.offset)
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+
+    rows = db.fetch_candidates_covering_offset(rom.id, offset, limit=args.limit)
+    db.close()
+    if not rows:
+        print(f"Nenhum candidato cobre 0x{offset:08X}")
+        return 0
+
+    for row in rows:
+        print(
+            f"{row['string_uid']} start=0x{row['start_off']:08X} end=0x{row['end_off']:08X} "
+            f"kind={row['kind']} conf={row['confidence']:.2f} text={row['normalized_text']}"
+        )
+    return 0
+
+
+def cmd_list_range_candidates(args: argparse.Namespace) -> int:
+    start = _parse_hex(args.start)
+    end = _parse_hex(args.end)
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+
+    rows = db.fetch_candidates_in_range(rom.id, start, end, limit=args.limit)
+    db.close()
+    for row in rows:
+        print(
+            f"{row['string_uid']} start=0x{row['start_off']:08X} end=0x{row['end_off']:08X} "
+            f"kind={row['kind']} conf={row['confidence']:.2f}"
+        )
     return 0
 
 
@@ -229,14 +322,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--limit", type=int, default=20)
     p_list.set_defaults(func=cmd_list_strings)
 
-    p_dump = sub.add_parser("dump-range", help="Dump hex de faixa")
+    p_dump = sub.add_parser("dump-range", help="Visualiza faixa de ROM em raw/decode/annotate")
     p_dump.add_argument("--start", required=True)
     p_dump.add_argument("--end", required=True)
+    p_dump.add_argument("--mode", choices=["raw", "decode", "annotate"], default="raw")
+    p_dump.add_argument("--encoding", default="cp932")
+    p_dump.add_argument("--chunk-size", type=int, default=16)
+    p_dump.add_argument("--only-text", action="store_true")
+    p_dump.add_argument("--json", action="store_true", dest="json")
     p_dump.set_defaults(func=cmd_dump_range)
 
-    p_find = sub.add_parser("find-offset", help="Busca string por offset")
-    p_find.add_argument("--offset", required=True)
-    p_find.set_defaults(func=cmd_find_offset)
+    p_find_off = sub.add_parser("find-offset", help="Busca candidatos cobrindo um offset")
+    p_find_off.add_argument("--offset", required=True)
+    p_find_off.add_argument("--limit", type=int, default=20)
+    p_find_off.set_defaults(func=cmd_find_offset)
+
+    p_range = sub.add_parser("list-range-candidates", help="Lista candidatos que intersectam um range")
+    p_range.add_argument("--start", required=True)
+    p_range.add_argument("--end", required=True)
+    p_range.add_argument("--limit", type=int, default=200)
+    p_range.set_defaults(func=cmd_list_range_candidates)
 
     return parser
 
