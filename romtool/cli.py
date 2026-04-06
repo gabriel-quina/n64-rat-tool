@@ -60,7 +60,10 @@ def cmd_scan_text(args: argparse.Namespace) -> int:
         return 1
 
     profile = build_profile()
-    if not args.force:
+    start = _parse_hex(args.start) if args.start else None
+    end = _parse_hex(args.end) if args.end else None
+    range_scan = start is not None or end is not None
+    if not args.force and not range_scan:
         cache_hit = db.last_successful_run(rom.id, profile.name)
         if cache_hit:
             logger.info("Cache hit: scan já existe (run_id=%s). Use --force para reescanear.", cache_hit.id)
@@ -70,9 +73,10 @@ def cmd_scan_text(args: argparse.Namespace) -> int:
     run_id = db.create_analysis_run(rom.id, profile.name)
     rom_path = Path(rom.path)
     try:
-        result = scan_rom_file(rom_path, rom.id, run_id, profile)
+        result = scan_rom_file(rom_path, rom.id, run_id, profile, start=start, end=end)
         inserted = db.insert_string_candidates(result.candidates)
-        db.finish_analysis_run(run_id, "success", f"inserted={inserted}; scanned_bytes={result.scanned_bytes}")
+        range_note = f"; range=0x{start:08X}-0x{end:08X}" if range_scan and start is not None and end is not None else ""
+        db.finish_analysis_run(run_id, "success", f"inserted={inserted}; scanned_bytes={result.scanned_bytes}{range_note}")
         logger.info("Scan concluído. Candidatas encontradas=%d inseridas=%d", len(result.candidates), inserted)
     except Exception as exc:  # noqa: BLE001
         db.finish_analysis_run(run_id, "failed", str(exc))
@@ -117,7 +121,9 @@ def cmd_stats(_: argparse.Namespace) -> int:
 
     total = db.count_strings(rom.id)
     by_kind = db.count_by_kind(rom.id)
+    avg_by_kind = db.avg_length_by_kind(rom.id)
     by_band = db.count_by_offset_band(rom.id)
+    top_scores = db.top_confidence(rom.id, limit=5)
     last_run = db.last_successful_run(rom.id, build_profile().name)
 
     print(f"ROM: {rom.filename}")
@@ -126,9 +132,18 @@ def cmd_stats(_: argparse.Namespace) -> int:
     print("Por tipo:")
     for k, v in by_kind.items():
         print(f"  - {k}: {v}")
+    print("Média de bytes por tipo:")
+    for k, v in avg_by_kind.items():
+        print(f"  - {k}: {v:.2f}")
     print("Por faixa de offset:")
     for k, v in by_band.items():
         print(f"  - {k}: {v}")
+    print("Top scores:")
+    for row in top_scores:
+        print(
+            f"  - {row['string_uid']} off=0x{row['start_off']:08X} "
+            f"kind={row['kind']} conf={row['confidence']:.3f} text={row['normalized_text'][:60]}"
+        )
     if last_run:
         print(f"Último scan: run_id={last_run.id} started_at={last_run.started_at} status={last_run.status}")
     db.close()
@@ -163,6 +178,24 @@ def cmd_dump_range(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_find_offset(args: argparse.Namespace) -> int:
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+    offset = _parse_hex(args.offset)
+    row = db.find_string_by_offset(rom.id, offset)
+    db.close()
+    if not row:
+        logger.error("Nenhuma string cobre o offset 0x%08X", offset)
+        return 1
+    print(json.dumps(dict(row), indent=2, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="romtool", description="MVP scanner de texto para ROM N64")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -177,6 +210,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_scan = sub.add_parser("scan-text", help="Escaneia candidatos de texto")
     p_scan.add_argument("--force", action="store_true", help="Ignora cache e reexecuta")
+    p_scan.add_argument("--start", help="Offset inicial (hex ou decimal)")
+    p_scan.add_argument("--end", help="Offset final exclusivo (hex ou decimal)")
     p_scan.set_defaults(func=cmd_scan_text)
 
     p_export = sub.add_parser("export-strings", help="Exporta JSONL")
@@ -198,6 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_dump.add_argument("--start", required=True)
     p_dump.add_argument("--end", required=True)
     p_dump.set_defaults(func=cmd_dump_range)
+
+    p_find = sub.add_parser("find-offset", help="Busca string por offset")
+    p_find.add_argument("--offset", required=True)
+    p_find.set_defaults(func=cmd_find_offset)
 
     return parser
 

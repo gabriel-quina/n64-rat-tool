@@ -184,6 +184,17 @@ class RomToolDB:
         )
         return cur.fetchall()
 
+    def find_string_by_offset(self, rom_id: int, offset: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT * FROM string_candidate
+            WHERE rom_id=? AND ((start_off <= ? AND end_off > ?) OR start_off = ?)
+            ORDER BY CASE WHEN start_off = ? THEN 0 ELSE 1 END, confidence DESC, length_bytes DESC
+            LIMIT 1
+            """,
+            (rom_id, offset, offset, offset, offset),
+        ).fetchone()
+
     def count_strings(self, rom_id: int) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM string_candidate WHERE rom_id=?", (rom_id,)).fetchone()
         return int(row["c"])
@@ -207,6 +218,25 @@ class RomToolDB:
             key = f"0x{start:08X}-0x{end:08X}"
             bands[key] = bands.get(key, 0) + 1
         return dict(sorted(bands.items()))
+
+    def avg_length_by_kind(self, rom_id: int) -> dict[str, float]:
+        rows = self.conn.execute(
+            "SELECT kind, AVG(length_bytes) AS avg_len FROM string_candidate WHERE rom_id=? GROUP BY kind",
+            (rom_id,),
+        ).fetchall()
+        return {r["kind"]: float(r["avg_len"]) for r in rows}
+
+    def top_confidence(self, rom_id: int, limit: int = 5) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT string_uid, start_off, kind, confidence, normalized_text
+            FROM string_candidate
+            WHERE rom_id=?
+            ORDER BY confidence DESC, length_bytes DESC
+            LIMIT ?
+            """,
+            (rom_id, limit),
+        ).fetchall()
 
     @staticmethod
     def _row_to_rom(row: sqlite3.Row) -> RomRecord:
