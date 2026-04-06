@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from romtool import ANALYSIS_VERSION, SCHEMA_VERSION, __version__
-from romtool.models import AnalysisRunRecord, RomRecord, StringCandidate, now_iso
+from romtool.models import AnalysisRunRecord, RomRecord, SegmentRecord, StringCandidate, now_iso
 from romtool.rom import RomFingerprint
 
 
@@ -77,16 +77,43 @@ class RomToolDB:
             CREATE TABLE IF NOT EXISTS segment (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 rom_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
                 start_off INTEGER NOT NULL,
                 end_off INTEGER NOT NULL,
                 kind TEXT NOT NULL,
-                encoding TEXT,
+                encoding TEXT NOT NULL DEFAULT 'cp932',
                 notes TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(rom_id) REFERENCES rom(id)
             );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_segment_rom_name ON segment(rom_id, name);
+
+            CREATE TABLE IF NOT EXISTS segment_code_catalog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                segment_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                prefix_count INTEGER NOT NULL DEFAULT 0,
+                inline_count INTEGER NOT NULL DEFAULT 0,
+                suffix_count INTEGER NOT NULL DEFAULT 0,
+                example_strings_json TEXT NOT NULL DEFAULT '[]',
+                FOREIGN KEY(segment_id) REFERENCES segment(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_segment_code ON segment_code_catalog(segment_id, code);
             """
         )
+        self._ensure_segment_columns()
         self.conn.commit()
+
+    def _ensure_segment_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(segment)").fetchall()}
+        if "name" not in columns:
+            self.conn.execute("ALTER TABLE segment ADD COLUMN name TEXT")
+            self.conn.execute("UPDATE segment SET name = 'segment_' || id WHERE name IS NULL OR name = ''")
+        if "encoding" not in columns:
+            self.conn.execute("ALTER TABLE segment ADD COLUMN encoding TEXT")
+        self.conn.execute("UPDATE segment SET encoding='cp932' WHERE encoding IS NULL OR encoding=''")
 
     def upsert_rom(self, fp: RomFingerprint) -> RomRecord:
         cur = self.conn.cursor()
@@ -219,6 +246,84 @@ class RomToolDB:
         )
         return cur.fetchall()
 
+    def upsert_segment(
+        self,
+        rom_id: int,
+        name: str,
+        start_off: int,
+        end_off: int,
+        kind: str,
+        encoding: str = "cp932",
+        notes: str = "",
+    ) -> SegmentRecord:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO segment(rom_id, name, start_off, end_off, kind, encoding, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(rom_id, name) DO UPDATE SET
+                start_off=excluded.start_off,
+                end_off=excluded.end_off,
+                kind=excluded.kind,
+                encoding=excluded.encoding,
+                notes=excluded.notes
+            """,
+            (rom_id, name, start_off, end_off, kind, encoding, notes),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM segment WHERE rom_id=? AND name=?", (rom_id, name)).fetchone()
+        return self._row_to_segment(row)
+
+    def list_segments(self, rom_id: int) -> list[SegmentRecord]:
+        rows = self.conn.execute("SELECT * FROM segment WHERE rom_id=? ORDER BY start_off", (rom_id,)).fetchall()
+        return [self._row_to_segment(row) for row in rows]
+
+    def get_segment_by_name(self, rom_id: int, name: str) -> SegmentRecord | None:
+        row = self.conn.execute("SELECT * FROM segment WHERE rom_id=? AND name=?", (rom_id, name)).fetchone()
+        return self._row_to_segment(row) if row else None
+
+    def fetch_strings_for_segment(self, rom_id: int, segment_name: str, limit: int = 100000) -> list[sqlite3.Row]:
+        cur = self.conn.execute(
+            """
+            SELECT sc.*
+            FROM string_candidate sc
+            JOIN segment s ON s.rom_id=sc.rom_id
+            WHERE sc.rom_id=? AND s.name=? AND NOT (sc.end_off <= s.start_off OR sc.start_off >= s.end_off)
+            ORDER BY sc.start_off
+            LIMIT ?
+            """,
+            (rom_id, segment_name, limit),
+        )
+        return cur.fetchall()
+
+    def replace_segment_code_catalog(self, segment_id: int, items: list[dict]) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM segment_code_catalog WHERE segment_id=?", (segment_id,))
+        for item in items:
+            cur.execute(
+                """
+                INSERT INTO segment_code_catalog(
+                    segment_id, code, count, prefix_count, inline_count, suffix_count, example_strings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    segment_id,
+                    item["code"],
+                    item["count"],
+                    item["position_counts"]["prefix"],
+                    item["position_counts"]["inline"],
+                    item["position_counts"]["suffix"],
+                    item["example_strings_json"],
+                ),
+            )
+        self.conn.commit()
+
+    def fetch_segment_code_catalog(self, segment_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM segment_code_catalog WHERE segment_id=? ORDER BY count DESC, code ASC",
+            (segment_id,),
+        ).fetchall()
+
     def count_strings(self, rom_id: int) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM string_candidate WHERE rom_id=?", (rom_id,)).fetchone()
         return int(row["c"])
@@ -287,5 +392,18 @@ class RomToolDB:
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             status=row["status"],
+            notes=row["notes"],
+        )
+
+    @staticmethod
+    def _row_to_segment(row: sqlite3.Row) -> SegmentRecord:
+        return SegmentRecord(
+            id=row["id"],
+            rom_id=row["rom_id"],
+            name=row["name"],
+            start_off=row["start_off"],
+            end_off=row["end_off"],
+            kind=row["kind"],
+            encoding=row["encoding"],
             notes=row["notes"],
         )

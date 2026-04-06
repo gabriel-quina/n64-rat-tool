@@ -7,7 +7,8 @@ from pathlib import Path
 
 from romtool.db import RomToolDB
 from romtool.dumpview import annotate_blocks, blocks_to_json, chunk_bytes, decode_chunks, lines_to_json
-from romtool.exporter import export_jsonl
+from romtool.exporter import export_jsonl, export_segment_jsonl
+from romtool.segments import NON_TRANSLATABLE_KINDS, build_segment_code_catalog, tokenize_raw_text
 from romtool.profiles.generic_n64 import build_profile
 from romtool.rom import calculate_fingerprint, import_rom
 from romtool.scanner import scan_rom_file
@@ -211,6 +212,39 @@ def cmd_dump_range(args: argparse.Namespace) -> int:
             print(f"decoded={line.decoded}")
         return 0
 
+    if args.segment:
+        db = RomToolDB(db_path())
+        db.init_schema()
+        rom = db.get_latest_rom()
+        if not rom:
+            logger.error("Nenhuma ROM importada.")
+            db.close()
+            return 1
+        segment = db.get_segment_by_name(rom.id, args.segment)
+        db.close()
+        if not segment:
+            logger.error("Segmento não encontrado: %s", args.segment)
+            return 1
+        tokenized = tokenize_raw_text(data, encoding=segment.encoding)
+        payload = {
+            "offset": start,
+            "raw_hex": data.hex(),
+            "decoded": data.decode(segment.encoding, errors="replace"),
+            "text_guess": tokenized.text_visible,
+            "prefix_tokens": tokenized.prefix_tokens,
+            "suffix_tokens": tokenized.suffix_tokens,
+        }
+        if args.json:
+            print(json.dumps([payload], ensure_ascii=False, indent=2))
+            return 0
+        print(f"0x{start:08X}")
+        print(f"raw: {payload['raw_hex']}")
+        print(f"decoded: {payload['decoded']}")
+        print(f"prefix: {''.join(payload['prefix_tokens']) if payload['prefix_tokens'] else '-'}")
+        print(f"text_guess: {payload['text_guess'] if payload['text_guess'] else '-'}")
+        print(f"suffix: {''.join(payload['suffix_tokens']) if payload['suffix_tokens'] else '-'}")
+        return 0
+
     blocks = annotate_blocks(data, start=start, encoding=args.encoding, only_text=args.only_text)
     if args.json:
         print(blocks_to_json(blocks))
@@ -223,30 +257,6 @@ def cmd_dump_range(args: argparse.Namespace) -> int:
         print(f"prefix: {''.join(block.prefix_tokens) if block.prefix_tokens else '-'}")
         print(f"text_guess: {block.text_guess if block.text_guess else '-'}")
         print(f"suffix: {''.join(block.suffix_tokens) if block.suffix_tokens else '-'}")
-    return 0
-
-
-def cmd_find_offset(args: argparse.Namespace) -> int:
-    offset = _parse_hex(args.offset)
-    db = RomToolDB(db_path())
-    db.init_schema()
-    rom = db.get_latest_rom()
-    if not rom:
-        logger.error("Nenhuma ROM importada.")
-        db.close()
-        return 1
-
-    rows = db.fetch_candidates_covering_offset(rom.id, offset, limit=args.limit)
-    db.close()
-    if not rows:
-        print(f"Nenhum candidato cobre 0x{offset:08X}")
-        return 0
-
-    for row in rows:
-        print(
-            f"{row['string_uid']} start=0x{row['start_off']:08X} end=0x{row['end_off']:08X} "
-            f"kind={row['kind']} conf={row['confidence']:.2f} text={row['normalized_text']}"
-        )
     return 0
 
 
@@ -286,6 +296,136 @@ def cmd_find_offset(args: argparse.Namespace) -> int:
         logger.error("Nenhuma string cobre o offset 0x%08X", offset)
         return 1
     print(json.dumps(dict(row), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_segment_add(args: argparse.Namespace) -> int:
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+    start = _parse_hex(args.start)
+    end = _parse_hex(args.end)
+    if end <= start:
+        logger.error("Faixa inválida: --end deve ser maior que --start")
+        db.close()
+        return 2
+    segment = db.upsert_segment(
+        rom.id,
+        name=args.name,
+        start_off=start,
+        end_off=end,
+        kind=args.kind,
+        encoding=args.encoding,
+        notes=args.notes or "",
+    )
+    db.close()
+    logger.info(
+        "Segmento salvo: %s [0x%08X-0x%08X) kind=%s encoding=%s",
+        segment.name,
+        segment.start_off,
+        segment.end_off,
+        segment.kind,
+        segment.encoding,
+    )
+    return 0
+
+
+def cmd_segment_list(_: argparse.Namespace) -> int:
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+    segments = db.list_segments(rom.id)
+    db.close()
+    for segment in segments:
+        print(
+            f"{segment.name} start=0x{segment.start_off:08X} end=0x{segment.end_off:08X} "
+            f"kind={segment.kind} encoding={segment.encoding}"
+        )
+    return 0
+
+
+def cmd_segment_show(args: argparse.Namespace) -> int:
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+    segment = db.get_segment_by_name(rom.id, args.name)
+    db.close()
+    if not segment:
+        logger.error("Segmento não encontrado: %s", args.name)
+        return 1
+    print(
+        json.dumps(
+            {
+                "name": segment.name,
+                "start_off": f"0x{segment.start_off:08X}",
+                "end_off": f"0x{segment.end_off:08X}",
+                "kind": segment.kind,
+                "encoding": segment.encoding,
+                "notes": segment.notes,
+                "translatable": segment.kind not in NON_TRANSLATABLE_KINDS,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def cmd_export_segment(args: argparse.Namespace) -> int:
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+    out = Path(args.out)
+    count = export_segment_jsonl(db, rom.id, args.name, out)
+    db.close()
+    logger.info("Segmento exportado: %s (%d entradas) -> %s", args.name, count, out)
+    return 0
+
+
+def cmd_segment_codes(args: argparse.Namespace) -> int:
+    db = RomToolDB(db_path())
+    db.init_schema()
+    rom = db.get_latest_rom()
+    if not rom:
+        logger.error("Nenhuma ROM importada.")
+        db.close()
+        return 1
+    segment = db.get_segment_by_name(rom.id, args.name)
+    if not segment:
+        logger.error("Segmento não encontrado: %s", args.name)
+        db.close()
+        return 1
+    rows = db.fetch_strings_for_segment(rom.id, args.name, limit=1_000_000)
+    catalog = build_segment_code_catalog([dict(row) for row in rows], encoding=segment.encoding)
+    db.replace_segment_code_catalog(
+        segment.id,
+        [{**item, "example_strings_json": json.dumps(item["example_strings"], ensure_ascii=False)} for item in catalog],
+    )
+    if args.json:
+        print(json.dumps(catalog, ensure_ascii=False, indent=2))
+    else:
+        for item in catalog:
+            print(
+                f"{item['code']} count={item['count']} positions={','.join(item['positions'])} "
+                f"examples={','.join(item['example_strings'])}"
+            )
+    db.close()
     return 0
 
 
@@ -330,6 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dump.add_argument("--chunk-size", type=int, default=16)
     p_dump.add_argument("--only-text", action="store_true")
     p_dump.add_argument("--json", action="store_true", dest="json")
+    p_dump.add_argument("--segment", help="Nome do segmento para tokenização dedicada (modo annotate)")
     p_dump.set_defaults(func=cmd_dump_range)
 
     p_find_off = sub.add_parser("find-offset", help="Busca candidatos cobrindo um offset")
@@ -342,6 +483,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_range.add_argument("--end", required=True)
     p_range.add_argument("--limit", type=int, default=200)
     p_range.set_defaults(func=cmd_list_range_candidates)
+
+    kinds = ["menu", "system_prompt", "dialogue", "name_entry", "table", "unknown", "nontranslatable"]
+    p_seg_add = sub.add_parser("segment-add", help="Cria/atualiza segmento nomeado")
+    p_seg_add.add_argument("--name", required=True)
+    p_seg_add.add_argument("--start", required=True)
+    p_seg_add.add_argument("--end", required=True)
+    p_seg_add.add_argument("--kind", required=True, choices=kinds)
+    p_seg_add.add_argument("--encoding", default="cp932")
+    p_seg_add.add_argument("--notes", default="")
+    p_seg_add.set_defaults(func=cmd_segment_add)
+
+    p_seg_list = sub.add_parser("segment-list", help="Lista segmentos")
+    p_seg_list.set_defaults(func=cmd_segment_list)
+
+    p_seg_show = sub.add_parser("segment-show", help="Exibe segmento")
+    p_seg_show.add_argument("--name", required=True)
+    p_seg_show.set_defaults(func=cmd_segment_show)
+
+    p_export_seg = sub.add_parser("export-segment", help="Exporta JSONL orientado a tradução por segmento")
+    p_export_seg.add_argument("--name", required=True)
+    p_export_seg.add_argument("--out", required=True)
+    p_export_seg.set_defaults(func=cmd_export_segment)
+
+    p_seg_codes = sub.add_parser("segment-codes", help="Mostra catálogo de control codes por segmento")
+    p_seg_codes.add_argument("--name", required=True)
+    p_seg_codes.add_argument("--json", action="store_true")
+    p_seg_codes.set_defaults(func=cmd_segment_codes)
 
     return parser
 
